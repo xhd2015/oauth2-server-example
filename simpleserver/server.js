@@ -13,6 +13,7 @@ const authServer = new SimpleAuthServer()
 const userService = new UserService()
 
 const jwtSecret = "server_+auth_+"
+let codeStore = {}
 
 injectAsyncMethods(app)
 app.use(express.json())
@@ -30,7 +31,7 @@ app.use(function(err,req,res,next){
 })
 
 
-function issueGrantCodeRedirect(res,client_id,redirect_uri,response_type,state){
+function issueGrantCodeRedirect(res,access_token,client_id,redirect_uri,response_type,state){
 	// redirect to the specified url
 	if(!redirect_uri || !response_type){
 		throw "empty redirect_uri or response_type"
@@ -38,6 +39,9 @@ function issueGrantCodeRedirect(res,client_id,redirect_uri,response_type,state){
 
 	if(response_type!="code"){
 		throw "unsupported response_type:" + response_type
+	}
+	if(!access_token){
+		throw "requires access_token to map authorization code"
 	}
 	// generate grant code
 	// code => token map, this code is allowed to retrieve a token and
@@ -49,6 +53,8 @@ function issueGrantCodeRedirect(res,client_id,redirect_uri,response_type,state){
 	}catch(e){
 		throw "bad redirect url"
 	}
+	codeStore[code] = {access_token, exp: Math.floor(Date.now()/1000) + 60*60}
+
 	url.searchParams.append("code",code)
 	url.searchParams.append("state",state)
 
@@ -95,7 +101,7 @@ app.getAsync("/auth",function(req,res){
 		if(tokenValid){
 			console.log("token is valid:", token)
 			// can just redirect
-			issueGrantCodeRedirect(res,client_id,redirect_uri,response_type,state)
+			issueGrantCodeRedirect(res,token,client_id,redirect_uri,response_type,state)
 			return
 		}
 
@@ -242,13 +248,13 @@ app.getAsync("/login", async function(req,res){
 	// will clear tokens
 	res.clearCookie("token")
 	res.clearCookie("name")
-	let token = setCookieUser(res,name)
+	let access_token = setCookieUser(res,name)
 
 	if(!client_id){
 		// redirect to welcome
 		res.redirect("/static/welcome.html")
 	}else{
-		issueGrantCodeRedirect(res,client_id,redirect_uri,response_type,state)
+		issueGrantCodeRedirect(res,access_token,client_id,redirect_uri,response_type,state)
 	}
 })
 
@@ -276,11 +282,26 @@ app.postAsync("/token",function(req,res){
 		throw "wrong client_id or client_secret"
 	}
 
-	let token = authServer.generateAccessToken()
+	let codeStored = codeStore[code]
+	if(codeStored!=null && (!codeStored.access_token || codeStored.exp < Math.floor(Date.now()/1000))){
+		delete codeStore[code]
+		codeStored = null
+	}
+
+	if(codeStored==null){
+		throw "invalid code:" + code
+	}
+
+	// code is mapped
+	let {access_token} = codeStored
 
 	// resposne with token
+	res.set("Cache-Control","no-store")
+	res.set("Pragma","no-cache")
 	res.json({
-		token,
+		access_token,
+		token_type:"bearer",
+		expires_in:3600
 	})
 })
 

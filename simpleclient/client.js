@@ -31,10 +31,20 @@ app.use(requestLog)
 
 let tokenCache = {}
 let stateStore = {}
+let tokenStore = {}
 
-// validate all uri request
+// validate all uri request, this should be used as an nginx auth_request
+// backend(i.e. auth proxy)
+// read Authorization header,and parse token
+// - if token is valid and contains user name, set X-User-Name to user name and
+// return
+// - otherwise remember the redirect uri, then issue a request to auth server
 app.getAsync("/validate", async function(req,res){
-	let {token} = req.cookies
+	let authHeader = req.get("Authorization")
+	let token
+	if(authHeader && authHeader.startsWith("Bearer ")){
+		token = authHeader.slice("Bearer ".length)
+	}
 
 	let tokenCached 
 	if(token){
@@ -46,7 +56,7 @@ app.getAsync("/validate", async function(req,res){
 	}
 
 	if(tokenCached!=null){
-		res.set("X-Username",tokenCached.name)
+		res.set("X-User-Name",tokenCached.name)
 		res.sendStatus(200)
 		return
 	}
@@ -106,14 +116,44 @@ app.getAsync("/auth/callback",async function(req,res){
 		res.status(400).json({error:"internal error:authorization error"})
 		return
 	}
+	let {redirect_uri} = stateStored
 	let resp = await axios.post(authServer.token,new URLSearchParams({
 		code,
 		client_id:  clientID,
 		client_secret: clientSecret,
 		grant_type:"authorization_code",
+		redirect_uri,
 	}))
-	console.log("token resp:",resp.data)
-	res.send({"auth": resp.data})
+	console.log("resp.data",resp.data)
+
+	let {access_token,expires_in} = resp.data
+	if(!access_token){
+		console.log("access_token not present")
+		res.status(400).json({error:"internal error:authorization error"})
+		return
+	}
+	console.log("access_token:" ,access_token)
+	let exp
+	if(expires_in!=null && expires_in>0){
+		exp = Math.floor(Date.now()/1000) + expires_in
+	}else{
+		exp = Math.floor(Date.now()/1000) + 3600
+	}
+
+        let {name}= dec.decodeJWTPayload(access_token)
+	if(!name){
+		console.log("access_token does not contain name")
+		res.status(400).json({error:"internal error:authorization error"})
+		return
+	}
+
+	tokenStore[access_token] = {exp,name}
+
+	res.set("X-Token", access_token)
+	res.set("X-Redirect-URI", redirect_uri)
+	res.set("X-User-Name",name)
+
+	res.send("Authorization succeed")
 })
 
 app.getAsync("/hello",function(req,res){
